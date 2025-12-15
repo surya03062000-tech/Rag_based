@@ -5,26 +5,23 @@ import json
 import pdfplumber
 
 # =========================================================
-# BASIC CONFIG
+# PAGE CONFIG
 # =========================================================
 
 st.set_page_config(page_title="Databricks RAG Chatbot", layout="wide")
-st.title("🧠 Project Chatbot (Databricks GPT-OSS + Volume Upload)")
+st.title("🧠 Project Chatbot (Databricks GPT-OSS + UC Volume Upload)")
 
 # =========================================================
 # DATABRICKS CONFIG
 # =========================================================
 
-# Databricks Workspace
 DATABRICKS_HOST = "https://dbc-927300a1-adc8.cloud.databricks.com"
-
-# Serving endpoint (MLflow string-input model)
 SERVING_ENDPOINT = f"{DATABRICKS_HOST}/serving-endpoints/Project_chatbot/invocations"
 
-# Unity Catalog Volume path
+# Unity Catalog Volume
 VOLUME_PATH = "/Volumes/llm/rag/pdf_vol"
 
-# Token from Streamlit Secrets
+# Token from Streamlit secrets
 if "DATABRICKS_TOKEN" not in st.secrets:
     st.error("❌ DATABRICKS_TOKEN missing in Streamlit secrets")
     st.stop()
@@ -35,30 +32,28 @@ REQUEST_TIMEOUT = 120
 MAX_LEN = 6000
 
 # =========================================================
-# HELPERS – FILE UPLOAD (UC VOLUME)
+# UC VOLUME UPLOAD (v2.1 API)
 # =========================================================
 
 def upload_file_to_volume(file_obj):
     """
-    Upload file to Unity Catalog Volume using Databricks Files API
+    Upload file to Unity Catalog Volume using UC Volumes API (v2.1)
     """
     headers = {
         "Authorization": f"Bearer {DATABRICKS_TOKEN}"
     }
-
-    target_path = f"{VOLUME_PATH}/{file_obj.name}"
 
     files = {
         "file": (file_obj.name, file_obj.getvalue())
     }
 
     params = {
-        "path": target_path,
+        "path": f"{VOLUME_PATH}/{file_obj.name}",
         "overwrite": "true"
     }
 
     resp = requests.post(
-        f"{DATABRICKS_HOST}/api/2.0/files/upload",
+        f"{DATABRICKS_HOST}/api/2.1/unity-catalog/volumes/files",
         headers=headers,
         files=files,
         params=params,
@@ -70,23 +65,20 @@ def upload_file_to_volume(file_obj):
             f"Upload failed for {file_obj.name}: {resp.text}"
         )
 
-    return target_path
+    return params["path"]
 
 # =========================================================
-# HELPERS – CHAT
+# CHAT MODEL CALL (MLflow string input)
 # =========================================================
 
 def call_serving_endpoint(prompt: str):
-    """
-    Call Databricks Serving Endpoint (MLflow string input)
-    """
     headers = {
         "Authorization": f"Bearer {DATABRICKS_TOKEN}",
         "Content-Type": "application/json"
     }
 
     payload = {
-        "inputs": prompt
+        "inputs": prompt   # 🔑 STRING input (MLflow pyfunc)
     }
 
     resp = requests.post(
@@ -106,9 +98,6 @@ def call_serving_endpoint(prompt: str):
 
 
 def parse_model_response(response):
-    """
-    Safely parse MLflow model response
-    """
     if not response:
         return "❌ Empty response from model"
 
@@ -134,7 +123,7 @@ if "chat" not in st.session_state:
     st.session_state.chat = []
 
 # =========================================================
-# SIDEBAR – FILE UPLOAD + SETTINGS
+# SIDEBAR
 # =========================================================
 
 with st.sidebar:
@@ -170,7 +159,7 @@ with st.sidebar:
     )
 
 # =========================================================
-# CHAT HISTORY UI
+# CHAT UI
 # =========================================================
 
 for role, msg in st.session_state.chat:
@@ -189,7 +178,6 @@ if user_question:
         st.error("❌ Message too long")
         st.stop()
 
-    # Show user message
     st.session_state.chat.append(("user", user_question))
     with st.chat_message("user"):
         st.markdown(user_question)
