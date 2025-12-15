@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
-import io, json
+import io
+import json
 import pdfplumber
 
 # =========================================================
@@ -8,8 +9,9 @@ import pdfplumber
 # =========================================================
 
 st.set_page_config(page_title="Databricks GPT-OSS Chatbot", layout="wide")
-st.title("🧠 Project Chatbot (databricks-gpt-oss-120b)")
+st.title("🧠 Project Chatbot (Databricks GPT-OSS via MLflow)")
 
+# ---- Token (MANDATORY: Streamlit Secrets) ----
 if "DATABRICKS_TOKEN" not in st.secrets:
     st.error("❌ DATABRICKS_TOKEN missing in Streamlit secrets")
     st.stop()
@@ -29,36 +31,46 @@ MAX_LEN = 6000
 # =========================================================
 
 def extract_file_text(file):
+    """Extract text from PDF or TXT."""
     if not file:
         return ""
+
     content = file.read()
 
+    # PDF
     if content[:4] == b"%PDF":
         pages = []
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
-            for i, page in enumerate(pdf.pages):
-                txt = page.extract_text()
-                if txt:
-                    pages.append(f"[page {i+1}]\n{txt}")
+        try:
+            with pdfplumber.open(io.BytesIO(content)) as pdf:
+                for i, page in enumerate(pdf.pages):
+                    txt = page.extract_text()
+                    if txt:
+                        pages.append(f"[page {i+1}]\n{txt}")
+        except Exception as e:
+            return f"PDF parse error: {e}"
+
         return "\n\n".join(pages)
 
-    return content.decode("utf-8", errors="ignore")
+    # TXT
+    try:
+        return content.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
 
 
-def call_chat_endpoint(messages, max_tokens, temperature, top_p):
+def call_serving_endpoint(prompt: str):
+    """
+    Call Databricks Model Serving endpoint
+    expecting STRING input → STRING output (MLflow pyfunc style)
+    """
     headers = {
         "Authorization": f"Bearer {DATABRICKS_TOKEN}",
         "Content-Type": "application/json"
     }
 
-    # 🔥 THIS IS THE CRITICAL FIX
+    # 🔑 CRITICAL: STRING input only
     payload = {
-        "inputs": {
-            "messages": messages,
-            "max_tokens": int(max_tokens),
-            "temperature": float(temperature),
-            "top_p": float(top_p)
-        }
+        "inputs": prompt
     }
 
     resp = requests.post(
@@ -78,26 +90,22 @@ def call_chat_endpoint(messages, max_tokens, temperature, top_p):
 
 
 def parse_model_response(response):
-    if response is None:
-        return "❌ Model returned empty response"
+    """Safely extract text from MLflow-style response."""
+    if not response:
+        return "❌ Empty response from model"
 
     if isinstance(response, dict):
-
-        # MLflow / Databricks standard
-        if response.get("predictions"):
-            pred = response["predictions"][0]
-            if isinstance(pred, dict):
-                return pred.get("content") or pred.get("text") or json.dumps(pred)
-            return str(pred)
-
-        # OpenAI-style
-        if response.get("choices"):
-            return response["choices"][0]["message"]["content"]
+        # Expected MLflow output
+        if response.get("predictions") is not None:
+            preds = response["predictions"]
+            if isinstance(preds, list) and len(preds) > 0:
+                return str(preds[0])
+            return str(preds)
 
         if response.get("raw_text"):
             return response["raw_text"]
 
-        return json.dumps(response)
+        return json.dumps(response, indent=2)
 
     return str(response)
 
@@ -125,21 +133,6 @@ with st.sidebar:
         ["English", "Tamil"]
     )
 
-    max_tokens = st.slider(
-        "Max Tokens",
-        100, 1000, 300, step=50
-    )
-
-    temperature = st.slider(
-        "Temperature",
-        0.0, 1.0, 0.0, step=0.05
-    )
-
-    top_p = st.slider(
-        "Top-P",
-        0.1, 1.0, 1.0, step=0.05
-    )
-
     uploaded_file = st.file_uploader(
         "Attach file (PDF / TXT)",
         type=["pdf", "txt"]
@@ -151,7 +144,7 @@ with st.sidebar:
     )
 
 # =========================================================
-# CHAT HISTORY
+# CHAT HISTORY UI
 # =========================================================
 
 for role, msg in st.session_state.chat:
@@ -170,6 +163,7 @@ if user_question:
         st.error("❌ Message too long")
         st.stop()
 
+    # Show user message
     st.session_state.chat.append(("user", user_question))
     with st.chat_message("user"):
         st.markdown(user_question)
@@ -178,48 +172,43 @@ if user_question:
         with st.spinner("Thinking..."):
 
             try:
+                # ---------- Context ----------
                 file_context = ""
                 if uploaded_file and prepend_file:
                     file_context = extract_file_text(uploaded_file)[:3000]
 
                 persona_map = {
-                    "Concise": "Answer concisely in bullet points.",
-                    "Detailed": "Provide detailed explanation with examples.",
-                    "Troubleshooter": "Explain root cause and resolution steps."
+                    "Concise": "Answer concisely in clear bullet points.",
+                    "Detailed": "Provide a detailed explanation with examples.",
+                    "Troubleshooter": (
+                        "Assume the user is troubleshooting. "
+                        "Explain root cause and resolution steps."
+                    )
                 }
 
                 system_prompt = persona_map.get(persona, "")
 
                 if ui_lang == "Tamil":
                     system_prompt += (
-                        "\nAfter English answer, also provide short Tamil explanation."
+                        "\nAfter the English answer, "
+                        "also provide a short Tamil explanation."
                     )
 
-                messages = []
+                # ---------- FINAL STRING PROMPT ----------
+                prompt_parts = []
 
                 if system_prompt:
-                    messages.append({
-                        "role": "system",
-                        "content": system_prompt
-                    })
+                    prompt_parts.append(system_prompt)
 
                 if file_context:
-                    messages.append({
-                        "role": "system",
-                        "content": f"Context:\n{file_context}"
-                    })
+                    prompt_parts.append("Context:\n" + file_context)
 
-                messages.append({
-                    "role": "user",
-                    "content": user_question
-                })
+                prompt_parts.append("User question:\n" + user_question)
 
-                response = call_chat_endpoint(
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=top_p
-                )
+                final_prompt = "\n\n".join(prompt_parts)
+
+                # ---------- CALL MODEL ----------
+                response = call_serving_endpoint(final_prompt)
 
                 answer = parse_model_response(response)
 
