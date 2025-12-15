@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import io
 import json
+import base64
 import pdfplumber
 
 # =========================================================
@@ -11,17 +12,18 @@ import pdfplumber
 st.set_page_config(page_title="Databricks GPT-OSS Chatbot", layout="wide")
 st.title("🧠 Project Chatbot (Databricks GPT-OSS via MLflow)")
 
-# ---- Token (MANDATORY: Streamlit Secrets) ----
+# ---- Secrets ----
 if "DATABRICKS_TOKEN" not in st.secrets:
     st.error("❌ DATABRICKS_TOKEN missing in Streamlit secrets")
     st.stop()
 
 DATABRICKS_TOKEN = st.secrets["DATABRICKS_TOKEN"]
 
-API_ENDPOINT = (
-    "https://dbc-927300a1-adc8.cloud.databricks.com"
-    "/serving-endpoints/Project_chatbot/invocations"
-)
+DATABRICKS_HOST = "https://dbc-927300a1-adc8.cloud.databricks.com"
+SERVING_ENDPOINT = f"{DATABRICKS_HOST}/serving-endpoints/Project_chatbot/invocations"
+
+# Target Volume path
+VOLUME_PATH = "/Volumes/llm/rag/pdf_vol"
 
 REQUEST_TIMEOUT = 120
 MAX_LEN = 6000
@@ -30,51 +32,50 @@ MAX_LEN = 6000
 # HELPERS
 # =========================================================
 
-def extract_file_text(file):
-    """Extract text from PDF or TXT."""
-    if not file:
-        return ""
+def upload_file_to_volume(file_obj):
+    """
+    Upload a file from Streamlit to Databricks Volume using DBFS API
+    """
+    content = file_obj.read()
+    b64_content = base64.b64encode(content).decode("utf-8")
 
-    content = file.read()
+    dbfs_path = f"{VOLUME_PATH}/{file_obj.name}"
 
-    # PDF
-    if content[:4] == b"%PDF":
-        pages = []
-        try:
-            with pdfplumber.open(io.BytesIO(content)) as pdf:
-                for i, page in enumerate(pdf.pages):
-                    txt = page.extract_text()
-                    if txt:
-                        pages.append(f"[page {i+1}]\n{txt}")
-        except Exception as e:
-            return f"PDF parse error: {e}"
+    headers = {
+        "Authorization": f"Bearer {DATABRICKS_TOKEN}"
+    }
 
-        return "\n\n".join(pages)
+    payload = {
+        "path": dbfs_path,
+        "overwrite": True,
+        "contents": b64_content
+    }
 
-    # TXT
-    try:
-        return content.decode("utf-8", errors="ignore")
-    except Exception:
-        return ""
+    resp = requests.post(
+        f"{DATABRICKS_HOST}/api/2.0/dbfs/put",
+        headers=headers,
+        json=payload,
+        timeout=REQUEST_TIMEOUT
+    )
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"Upload failed for {file_obj.name}: {resp.text}")
+
+    return dbfs_path
 
 
 def call_serving_endpoint(prompt: str):
-    """
-    Call Databricks Model Serving endpoint
-    expecting STRING input → STRING output (MLflow pyfunc style)
-    """
     headers = {
         "Authorization": f"Bearer {DATABRICKS_TOKEN}",
         "Content-Type": "application/json"
     }
 
-    # 🔑 CRITICAL: STRING input only
     payload = {
         "inputs": prompt
     }
 
     resp = requests.post(
-        API_ENDPOINT,
+        SERVING_ENDPOINT,
         headers=headers,
         json=payload,
         timeout=REQUEST_TIMEOUT
@@ -90,12 +91,10 @@ def call_serving_endpoint(prompt: str):
 
 
 def parse_model_response(response):
-    """Safely extract text from MLflow-style response."""
     if not response:
         return "❌ Empty response from model"
 
     if isinstance(response, dict):
-        # Expected MLflow output
         if response.get("predictions") is not None:
             preds = response["predictions"]
             if isinstance(preds, list) and len(preds) > 0:
@@ -121,7 +120,25 @@ if "chat" not in st.session_state:
 # =========================================================
 
 with st.sidebar:
-    st.header("⚙️ Settings")
+    st.header("📂 Upload files to Databricks Volume")
+
+    uploaded_files = st.file_uploader(
+        "Select files (PDF / TXT / DOCX / XLSX)",
+        type=["pdf", "txt", "docx", "xlsx"],
+        accept_multiple_files=True
+    )
+
+    if uploaded_files:
+        if st.button("⬆️ Upload to Databricks Volume"):
+            for f in uploaded_files:
+                try:
+                    path = upload_file_to_volume(f)
+                    st.success(f"Uploaded: {path}")
+                except Exception as e:
+                    st.error(str(e))
+
+    st.divider()
+    st.header("⚙️ Chat Settings")
 
     persona = st.selectbox(
         "Persona",
@@ -133,18 +150,8 @@ with st.sidebar:
         ["English", "Tamil"]
     )
 
-    uploaded_file = st.file_uploader(
-        "Attach file (PDF / TXT)",
-        type=["pdf", "txt"]
-    )
-
-    prepend_file = st.checkbox(
-        "Use file as context",
-        value=False
-    )
-
 # =========================================================
-# CHAT HISTORY UI
+# CHAT UI
 # =========================================================
 
 for role, msg in st.session_state.chat:
@@ -163,7 +170,6 @@ if user_question:
         st.error("❌ Message too long")
         st.stop()
 
-    # Show user message
     st.session_state.chat.append(("user", user_question))
     with st.chat_message("user"):
         st.markdown(user_question)
@@ -172,44 +178,22 @@ if user_question:
         with st.spinner("Thinking..."):
 
             try:
-                # ---------- Context ----------
-                file_context = ""
-                if uploaded_file and prepend_file:
-                    file_context = extract_file_text(uploaded_file)[:3000]
-
                 persona_map = {
-                    "Concise": "Answer concisely in clear bullet points.",
-                    "Detailed": "Provide a detailed explanation with examples.",
-                    "Troubleshooter": (
-                        "Assume the user is troubleshooting. "
-                        "Explain root cause and resolution steps."
-                    )
+                    "Concise": "Answer concisely in bullet points.",
+                    "Detailed": "Provide detailed explanation with examples.",
+                    "Troubleshooter": "Explain root cause and resolution steps."
                 }
 
                 system_prompt = persona_map.get(persona, "")
 
                 if ui_lang == "Tamil":
                     system_prompt += (
-                        "\nAfter the English answer, "
-                        "also provide a short Tamil explanation."
+                        "\nAfter the English answer, also provide a short Tamil explanation."
                     )
 
-                # ---------- FINAL STRING PROMPT ----------
-                prompt_parts = []
+                final_prompt = f"{system_prompt}\n\nUser question:\n{user_question}"
 
-                if system_prompt:
-                    prompt_parts.append(system_prompt)
-
-                if file_context:
-                    prompt_parts.append("Context:\n" + file_context)
-
-                prompt_parts.append("User question:\n" + user_question)
-
-                final_prompt = "\n\n".join(prompt_parts)
-
-                # ---------- CALL MODEL ----------
                 response = call_serving_endpoint(final_prompt)
-
                 answer = parse_model_response(response)
 
                 st.markdown(answer)
