@@ -222,5 +222,6 @@ if user_question:
 
 if st.button("Clear Chat"):
     st.session_state.chat = []
-    st.experimental_rerun()
+    st.rerun()
+
 
