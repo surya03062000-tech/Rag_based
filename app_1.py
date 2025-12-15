@@ -12,6 +12,7 @@ if "DATABRICKS_TOKEN" not in st.secrets:
     st.stop()
 
 DATABRICKS_TOKEN = st.secrets["DATABRICKS_TOKEN"]
+DATABRICKS_TOKEN = "dapic0f4a95b1ec9a487058dc18ec8144bf1"
 
 API_ENDPOINT = (
     "https://dbc-927300a1-adc8.cloud.databricks.com"
@@ -222,3 +223,4 @@ if user_question:
 if st.button("Clear Chat"):
     st.session_state.chat = []
     st.experimental_rerun()
+
