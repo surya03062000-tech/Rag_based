@@ -10,7 +10,6 @@ import pdfplumber
 st.set_page_config(page_title="Databricks GPT-OSS Chatbot", layout="wide")
 st.title("🧠 Project Chatbot (databricks-gpt-oss-120b)")
 
-# --- Token (MUST be in Streamlit Secrets) ---
 if "DATABRICKS_TOKEN" not in st.secrets:
     st.error("❌ DATABRICKS_TOKEN missing in Streamlit secrets")
     st.stop()
@@ -30,43 +29,36 @@ MAX_LEN = 6000
 # =========================================================
 
 def extract_file_text(file):
-    """Extract text from PDF or TXT file."""
     if not file:
         return ""
     content = file.read()
 
-    # PDF
     if content[:4] == b"%PDF":
         pages = []
-        try:
-            with pdfplumber.open(io.BytesIO(content)) as pdf:
-                for i, page in enumerate(pdf.pages):
-                    txt = page.extract_text()
-                    if txt:
-                        pages.append(f"[page {i+1}]\n{txt}")
-        except Exception as e:
-            return f"PDF parse error: {e}"
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for i, page in enumerate(pdf.pages):
+                txt = page.extract_text()
+                if txt:
+                    pages.append(f"[page {i+1}]\n{txt}")
         return "\n\n".join(pages)
 
-    # TXT
-    try:
-        return content.decode("utf-8", errors="ignore")
-    except Exception:
-        return ""
+    return content.decode("utf-8", errors="ignore")
 
 
 def call_chat_endpoint(messages, max_tokens, temperature, top_p):
-    """Call Databricks GPT-OSS serving endpoint safely."""
     headers = {
         "Authorization": f"Bearer {DATABRICKS_TOKEN}",
         "Content-Type": "application/json"
     }
 
+    # 🔥 THIS IS THE CRITICAL FIX
     payload = {
-        "messages": messages,
-        "max_tokens": int(max_tokens),
-        "temperature": float(temperature),
-        "top_p": float(top_p)
+        "inputs": {
+            "messages": messages,
+            "max_tokens": int(max_tokens),
+            "temperature": float(temperature),
+            "top_p": float(top_p)
+        }
     }
 
     resp = requests.post(
@@ -86,30 +78,26 @@ def call_chat_endpoint(messages, max_tokens, temperature, top_p):
 
 
 def parse_model_response(response):
-    """Safely extract text from any Databricks response."""
     if response is None:
         return "❌ Model returned empty response"
 
     if isinstance(response, dict):
+
+        # MLflow / Databricks standard
+        if response.get("predictions"):
+            pred = response["predictions"][0]
+            if isinstance(pred, dict):
+                return pred.get("content") or pred.get("text") or json.dumps(pred)
+            return str(pred)
+
+        # OpenAI-style
         if response.get("choices"):
-            try:
-                return response["choices"][0]["message"]["content"]
-            except Exception:
-                return json.dumps(response)
-
-        if response.get("output"):
-            return response["output"]
-
-        if response.get("result"):
-            return response["result"]
+            return response["choices"][0]["message"]["content"]
 
         if response.get("raw_text"):
             return response["raw_text"]
 
         return json.dumps(response)
-
-    if isinstance(response, list):
-        return "\n".join(str(x) for x in response)
 
     return str(response)
 
@@ -163,7 +151,7 @@ with st.sidebar:
     )
 
 # =========================================================
-# CHAT HISTORY UI
+# CHAT HISTORY
 # =========================================================
 
 for role, msg in st.session_state.chat:
@@ -182,34 +170,29 @@ if user_question:
         st.error("❌ Message too long")
         st.stop()
 
-    # Display user message
     st.session_state.chat.append(("user", user_question))
     with st.chat_message("user"):
         st.markdown(user_question)
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
+
             try:
-                # -------- Context --------
                 file_context = ""
                 if uploaded_file and prepend_file:
                     file_context = extract_file_text(uploaded_file)[:3000]
 
                 persona_map = {
-                    "Concise": "Answer concisely in clear bullet points.",
-                    "Detailed": "Provide a detailed explanation with examples.",
-                    "Troubleshooter": (
-                        "Assume the user is troubleshooting. "
-                        "Explain root cause and resolution steps."
-                    )
+                    "Concise": "Answer concisely in bullet points.",
+                    "Detailed": "Provide detailed explanation with examples.",
+                    "Troubleshooter": "Explain root cause and resolution steps."
                 }
 
                 system_prompt = persona_map.get(persona, "")
 
                 if ui_lang == "Tamil":
                     system_prompt += (
-                        "\nAfter the English answer, also provide "
-                        "a short Tamil explanation."
+                        "\nAfter English answer, also provide short Tamil explanation."
                     )
 
                 messages = []
@@ -223,7 +206,7 @@ if user_question:
                 if file_context:
                     messages.append({
                         "role": "system",
-                        "content": f"Context from uploaded file:\n{file_context}"
+                        "content": f"Context:\n{file_context}"
                     })
 
                 messages.append({
@@ -231,7 +214,6 @@ if user_question:
                     "content": user_question
                 })
 
-                # -------- Call model --------
                 response = call_chat_endpoint(
                     messages=messages,
                     max_tokens=max_tokens,
