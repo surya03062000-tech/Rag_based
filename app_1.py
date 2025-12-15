@@ -14,7 +14,7 @@ DATABRICKS_HOST = "https://dbc-927300a1-adc8.cloud.databricks.com"
 JOB_ID = "615973198764755"   # your job id
 
 # Workspace path (external REST allowed)
-WORKSPACE_DIR = "/Workspace/Users/surya@tcs.com/streamlit_uploads"
+WORKSPACE_DIR = "/Workspace/Users/surya03062000@gmail.com/streamlit_uploads"
 
 if "DATABRICKS_TOKEN" not in st.secrets:
     st.error("❌ DATABRICKS_TOKEN missing in Streamlit secrets")
@@ -119,3 +119,4 @@ st.markdown(
 ✔ Enterprise-safe
 """
 )
+
