@@ -2,69 +2,84 @@ import streamlit as st
 import requests
 import io
 import json
-import base64
 import pdfplumber
 
 # =========================================================
-# CONFIG
+# BASIC CONFIG
 # =========================================================
 
-st.set_page_config(page_title="Databricks GPT-OSS Chatbot", layout="wide")
-st.title("🧠 Project Chatbot (Databricks GPT-OSS via MLflow)")
+st.set_page_config(page_title="Databricks RAG Chatbot", layout="wide")
+st.title("🧠 Project Chatbot (Databricks GPT-OSS + Volume Upload)")
 
-# ---- Secrets ----
+# =========================================================
+# DATABRICKS CONFIG
+# =========================================================
+
+# Databricks Workspace
+DATABRICKS_HOST = "https://dbc-927300a1-adc8.cloud.databricks.com"
+
+# Serving endpoint (MLflow string-input model)
+SERVING_ENDPOINT = f"{DATABRICKS_HOST}/serving-endpoints/Project_chatbot/invocations"
+
+# Unity Catalog Volume path
+VOLUME_PATH = "/Volumes/llm/rag/pdf_vol"
+
+# Token from Streamlit Secrets
 if "DATABRICKS_TOKEN" not in st.secrets:
     st.error("❌ DATABRICKS_TOKEN missing in Streamlit secrets")
     st.stop()
 
 DATABRICKS_TOKEN = st.secrets["DATABRICKS_TOKEN"]
 
-DATABRICKS_HOST = "https://dbc-927300a1-adc8.cloud.databricks.com"
-SERVING_ENDPOINT = f"{DATABRICKS_HOST}/serving-endpoints/Project_chatbot/invocations"
-
-# Target Volume path
-VOLUME_PATH = "/Volumes/llm/rag/pdf_vol"
-
 REQUEST_TIMEOUT = 120
 MAX_LEN = 6000
 
 # =========================================================
-# HELPERS
+# HELPERS – FILE UPLOAD (UC VOLUME)
 # =========================================================
 
 def upload_file_to_volume(file_obj):
     """
-    Upload a file from Streamlit to Databricks Volume using DBFS API
+    Upload file to Unity Catalog Volume using Databricks Files API
     """
-    content = file_obj.read()
-    b64_content = base64.b64encode(content).decode("utf-8")
-
-    dbfs_path = f"{VOLUME_PATH}/{file_obj.name}"
-
     headers = {
         "Authorization": f"Bearer {DATABRICKS_TOKEN}"
     }
 
-    payload = {
-        "path": dbfs_path,
-        "overwrite": True,
-        "contents": b64_content
+    target_path = f"{VOLUME_PATH}/{file_obj.name}"
+
+    files = {
+        "file": (file_obj.name, file_obj.getvalue())
+    }
+
+    params = {
+        "path": target_path,
+        "overwrite": "true"
     }
 
     resp = requests.post(
-        f"{DATABRICKS_HOST}/api/2.0/dbfs/put",
+        f"{DATABRICKS_HOST}/api/2.0/files/upload",
         headers=headers,
-        json=payload,
+        files=files,
+        params=params,
         timeout=REQUEST_TIMEOUT
     )
 
     if resp.status_code != 200:
-        raise RuntimeError(f"Upload failed for {file_obj.name}: {resp.text}")
+        raise RuntimeError(
+            f"Upload failed for {file_obj.name}: {resp.text}"
+        )
 
-    return dbfs_path
+    return target_path
 
+# =========================================================
+# HELPERS – CHAT
+# =========================================================
 
 def call_serving_endpoint(prompt: str):
+    """
+    Call Databricks Serving Endpoint (MLflow string input)
+    """
     headers = {
         "Authorization": f"Bearer {DATABRICKS_TOKEN}",
         "Content-Type": "application/json"
@@ -91,6 +106,9 @@ def call_serving_endpoint(prompt: str):
 
 
 def parse_model_response(response):
+    """
+    Safely parse MLflow model response
+    """
     if not response:
         return "❌ Empty response from model"
 
@@ -116,28 +134,29 @@ if "chat" not in st.session_state:
     st.session_state.chat = []
 
 # =========================================================
-# SIDEBAR
+# SIDEBAR – FILE UPLOAD + SETTINGS
 # =========================================================
 
 with st.sidebar:
-    st.header("📂 Upload files to Databricks Volume")
+    st.header("📂 Upload Files to Databricks Volume")
 
     uploaded_files = st.file_uploader(
-        "Select files (PDF / TXT / DOCX / XLSX)",
+        "Select files",
         type=["pdf", "txt", "docx", "xlsx"],
         accept_multiple_files=True
     )
 
     if uploaded_files:
-        if st.button("⬆️ Upload to Databricks Volume"):
+        if st.button("⬆️ Upload to /Volumes/llm/rag/pdf_vol"):
             for f in uploaded_files:
                 try:
                     path = upload_file_to_volume(f)
-                    st.success(f"Uploaded: {path}")
+                    st.success(f"✅ Uploaded: {path}")
                 except Exception as e:
                     st.error(str(e))
 
     st.divider()
+
     st.header("⚙️ Chat Settings")
 
     persona = st.selectbox(
@@ -151,7 +170,7 @@ with st.sidebar:
     )
 
 # =========================================================
-# CHAT UI
+# CHAT HISTORY UI
 # =========================================================
 
 for role, msg in st.session_state.chat:
@@ -170,6 +189,7 @@ if user_question:
         st.error("❌ Message too long")
         st.stop()
 
+    # Show user message
     st.session_state.chat.append(("user", user_question))
     with st.chat_message("user"):
         st.markdown(user_question)
@@ -181,7 +201,10 @@ if user_question:
                 persona_map = {
                     "Concise": "Answer concisely in bullet points.",
                     "Detailed": "Provide detailed explanation with examples.",
-                    "Troubleshooter": "Explain root cause and resolution steps."
+                    "Troubleshooter": (
+                        "Assume the user is troubleshooting. "
+                        "Explain root cause and resolution steps."
+                    )
                 }
 
                 system_prompt = persona_map.get(persona, "")
